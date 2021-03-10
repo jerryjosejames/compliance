@@ -1,0 +1,85 @@
+/*
+ * Verifies that Audit Variance has been correctly configured in a given job
+ *
+ * Rationale:
+ * The audit reports rely on matching metadata in the job description with job links
+ * using a set of defined naming standards. When job description and link metadata 
+ * cannot be associated, the audit report will not produce sensible results
+ *
+ * This compliance rule has been designed to identify these sort of problems at 
+ * job design time rather than trying to debug unexpected audit reports after executing
+ * an end-to-end execution.
+ */
+
+
+item.graph.V.stage.has("stageType", "PxSort")
+  .comply { "${it.failMessage}" } { stage ->
+
+    def inputMetabag = stage.in.next().pin.out.metabag
+    def partCol = inputMetabag."APT.Part/Col".next()?:"auto"
+    def sortCol = stage.key
+
+    // If "same", look upstream
+    if (partCol && partCol == 'same') {
+      def upStage = stage
+      def upPartCol = partCol
+      def upMetabag = null
+
+      upStage = upStage.in?.stage.next()
+      upMetabag = upStage?.in?.pin.next().out.metabag.next()
+      while (true){
+        if (upMetabag) {
+          upPartCol = upMetabag."APT.Part/Col"?:'auto'
+        }
+
+        if (!upStage || upPartCol != 'same') {
+          break
+        }
+
+        upStage = upStage.in?.stage.next()
+        upMetabag = upStage?.in?.pin.next().out.metabag.next()
+      }
+
+      partCol = upPartCol
+    }
+
+    if ((partCol == "auto") ||
+        (partCol == 'DB2') ||
+        (partCol == 'same')) {
+      // We can't tell from the design, but don't fail it because of that
+      return true
+    }
+    else if (partCol == 'entire') {
+      // Inefficient, but won't cause problems
+      return true
+    }
+    else if (partCol.toString().startsWith("hash ") || 
+             partCol.toString().startsWith("modulus ") || 
+             partCol.toString().startsWith("range ")) {
+      def partFieldsList = partCol.tokenize(" ")
+
+      def partType = partFieldsList[0]
+      partFieldsList.remove(0)
+
+      partFieldsList = partFieldsList.findResults { it.startsWith("-") ? null : it.toString() }
+
+      def partFields = partFieldsList.join(', ')
+      def sortFields = ""
+
+      for (def key in stage.key) { 
+          sortFields += ((sortFields.length() == 0)?"":",") + "${key}"
+      }
+
+      if (!partFieldsList.every { partFld ->
+        ("," + sortFields + ",").indexOf("," + partFld + ",") > -1
+      }) {
+        stage.failMessage = "${stage.stageName}: partition fields (${partFields}) are not aligned with sort fields (${sortFields})"
+        return false 
+      }
+    } else {
+      stage.failMessage = "${stage.stageName}: Partitioning scheme ${partCol} may exhibit unpredictable behaviour with Sort stages"
+      return false
+    }
+
+    return true
+  }
